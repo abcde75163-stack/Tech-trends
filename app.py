@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-기술동향 분석 보고서 자동생성 — Streamlit 위저드 UI (뼈대)
+기술동향 분석 보고서 자동생성 — Streamlit 위저드 UI
 GUIDE_v2.1 STEP1~8을 위저드 화면 흐름으로 구현한다.
-현재 구현 범위: STEP1~3 (입력→시나리오 판별→분류 확정) 까지.
-STEP4 이후(챕터별 본문 생성~문서 다운로드)는 다음 단계에서 구현 예정.
 """
 import streamlit as st
 import config
@@ -141,13 +139,10 @@ elif st.session_state.step == "confirm":
             st.rerun()
 
 # =================================================================
-# STEP4 이후 (본문 생성) — 플레이스홀더
-# =================================================================
-# =================================================================
-# STEP4~5: 챕터별 본문 생성
+# STEP4~8: 챕터 생성 → 차트 → 문서 조립 → 다운로드 (한 번에 진행)
 # =================================================================
 elif st.session_state.step == "generate":
-    st.subheader("STEP 4~5. 챕터별 본문 생성")
+    st.subheader("보고서 생성")
 
     confirmed_context = dict(
         tech_name=st.session_state.inputs["tech_name"],
@@ -160,80 +155,83 @@ elif st.session_state.step == "generate":
 
     if "chapter_results" not in st.session_state:
         st.session_state.chapter_results = None
+    if "docx_buffer" not in st.session_state:
+        st.session_state.docx_buffer = None
+    if "gen_error" not in st.session_state:
+        st.session_state.gen_error = None
 
-    if st.session_state.chapter_results is None:
+    if st.session_state.docx_buffer is None:
         st.info(f"확정된 시나리오: {config.SCENARIO_LABELS[confirmed_context['scenario']]}")
-        if st.button("보고서 본문 생성 시작 (Call 2~6)", type="primary", width='stretch'):
+
+        if st.button("보고서 생성 시작", type="primary", width='stretch'):
+            st.session_state.gen_error = None
             progress_bar = st.progress(0.0)
             status_text = st.empty()
 
             def on_progress(idx, total, label):
-                progress_bar.progress(idx / total)
+                progress_bar.progress(idx / total * 0.7)
                 status_text.write(f"{idx}/{total} — {label} 생성 중...")
 
-            from core.report_generator import run_all_calls
             try:
+                from core.report_generator import run_all_calls
                 results = run_all_calls(confirmed_context, progress_callback=on_progress)
+                st.session_state.chapter_results = results
+
+                status_text.write("차트 6종 생성 중...")
+                progress_bar.progress(0.8)
+                from core.chart_generator import generate_all_charts
+                chart_images = generate_all_charts(results)
+
+                status_text.write("Word 문서 조립 중...")
+                progress_bar.progress(0.95)
+                from core.docx_builder import build_report_docx
+                import datetime
+                docx_buf = build_report_docx(
+                    tech_name=confirmed_context["tech_name"],
+                    purpose=confirmed_context["purpose"] or config.DEFAULT_PURPOSE,
+                    scenario_label=config.SCENARIO_LABELS[confirmed_context["scenario"]],
+                    date_str=datetime.date.today().strftime("%Y년 %m월"),
+                    chapter_results=results,
+                    chart_images=chart_images,
+                )
+                progress_bar.progress(1.0)
+                st.session_state.docx_buffer = docx_buf
+                st.rerun()
             except Exception as e:
-                st.error(f"챕터 생성 중 오류가 발생했습니다:\n\n{e}")
-                st.stop()
-            st.session_state.chapter_results = results
-            st.rerun()
+                st.session_state.gen_error = str(e)
+                st.rerun()
+
+        if st.session_state.gen_error:
+            st.error(f"보고서 생성 중 오류가 발생했습니다:\n\n{st.session_state.gen_error}")
+
+        if st.session_state.chapter_results:
+            with st.expander("🔧 고급: 생성된 원본 데이터 보기 (디버깅용)", expanded=False):
+                any_mock = any(v.get("mock") for v in st.session_state.chapter_results.values())
+                if any_mock:
+                    st.info("MOCK 응답 포함 — 실제 API 연결 전 구조 검증용입니다.", icon="🧪")
+                for call_id, label in [("call2", "Ⅰ·Ⅱ장"), ("call3", "Ⅲ·Ⅳ장"), ("call4", "Ⅴ장"),
+                                        ("call5", "Ⅵ·Ⅶ장"), ("call6", "Ⅷ·Ⅸ장")]:
+                    if call_id in st.session_state.chapter_results:
+                        st.markdown(f"**{label}**")
+                        st.json(st.session_state.chapter_results[call_id])
     else:
-        st.success("Call 2~6 전체 완료")
-        any_mock = any(v.get("mock") for v in st.session_state.chapter_results.values())
-        if any_mock:
-            st.info("MOCK 응답 포함 — 실제 API 연결 전 구조 검증용입니다.", icon="🧪")
-        for call_id, label in [("call2", "Ⅰ·Ⅱ장"), ("call3", "Ⅲ·Ⅳ장"), ("call4", "Ⅴ장"),
-                                ("call5", "Ⅵ·Ⅶ장"), ("call6", "Ⅷ·Ⅸ장")]:
-            with st.expander(f"{label} 결과 보기"):
+        st.success("문서 생성 완료")
+        fname = f"{confirmed_context['tech_name'].replace(' ', '_')}_기술동향분석.docx"
+        st.download_button(
+            "📥 Word 문서 다운로드",
+            data=st.session_state.docx_buffer,
+            file_name=fname,
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            type="primary",
+            width='stretch',
+        )
+        with st.expander("🔧 고급: 생성된 원본 데이터 보기 (디버깅용)", expanded=False):
+            for call_id, label in [("call2", "Ⅰ·Ⅱ장"), ("call3", "Ⅲ·Ⅳ장"), ("call4", "Ⅴ장"),
+                                    ("call5", "Ⅵ·Ⅶ장"), ("call6", "Ⅷ·Ⅸ장")]:
+                st.markdown(f"**{label}**")
                 st.json(st.session_state.chapter_results[call_id])
 
-        st.markdown("---")
-        st.subheader("STEP 6~8. 차트 생성 · 문서 조립 · 다운로드")
-
-        if "docx_buffer" not in st.session_state:
-            st.session_state.docx_buffer = None
-
-        if st.session_state.docx_buffer is None:
-            if st.button("차트 생성 및 Word 문서 조립", type="primary", width='stretch'):
-                try:
-                    with st.spinner("차트 6종 생성 중..."):
-                        from core.chart_generator import generate_all_charts, ChartDataError
-                        chart_images = generate_all_charts(st.session_state.chapter_results)
-                    with st.spinner("Word 문서 조립 중..."):
-                        from core.docx_builder import build_report_docx
-                        import datetime
-                        docx_buf = build_report_docx(
-                            tech_name=confirmed_context["tech_name"],
-                            purpose=confirmed_context["purpose"] or config.DEFAULT_PURPOSE,
-                            scenario_label=config.SCENARIO_LABELS[confirmed_context["scenario"]],
-                            date_str=datetime.date.today().strftime("%Y년 %m월"),
-                            chapter_results=st.session_state.chapter_results,
-                            chart_images=chart_images,
-                        )
-                    st.session_state.docx_buffer = docx_buf
-                    st.rerun()
-                except ChartDataError as e:
-                    st.error(f"차트 데이터 오류: {e}\n\n"
-                             f"Call2~6 응답이 기대한 스키마를 따르지 않았을 가능성이 있습니다. "
-                             f"실제 API 연결 후 프롬프트 스키마 준수 여부를 재확인해야 합니다.")
-                except KeyError as e:
-                    st.error(f"챕터 데이터 누락: {e} 키가 없습니다. Call2~6 응답 스키마를 확인하세요.")
-        else:
-            st.success("문서 생성 완료")
-            fname = f"{confirmed_context['tech_name'].replace(' ', '_')}_기술동향분석.docx"
-            st.download_button(
-                "📥 Word 문서 다운로드",
-                data=st.session_state.docx_buffer,
-                file_name=fname,
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                type="primary",
-                width='stretch',
-            )
-
-        if st.button("← 처음부터 다시"):
-            for k in ["step", "call1_result", "chapter_results", "docx_buffer"]:
-                st.session_state.pop(k, None)
-            st.rerun()
-
+    if st.button("← 처음부터 다시"):
+        for k in ["step", "call1_result", "chapter_results", "docx_buffer", "gen_error"]:
+            st.session_state.pop(k, None)
+        st.rerun()
